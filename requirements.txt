@@ -4,3 +4,5 @@ uvicorn[standard]
 python-multipart
 groq
 requests
+sqlalchemy
+pydantic
