@@ -31,7 +31,6 @@ def extract_company_github_username(text: str) -> Optional[str]:
         
         if response.lower() == 'none' or not response:
             return None
-        print(response)
             
         # Basic cleaning in case the model returns extra text
         return response.splitlines()[0].split()[0].replace("'", "").replace('"', '')

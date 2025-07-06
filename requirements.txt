@@ -6,3 +6,5 @@ groq
 requests
 sqlalchemy
 pydantic
+arq
+redis

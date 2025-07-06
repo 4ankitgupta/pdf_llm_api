@@ -11,7 +11,7 @@ app = FastAPI(
     version="1.0.0"
 )
 
-app.include_router(document.router, prefix="/api/documents", tags=["PDF Parser"])
+app.include_router(document.router, prefix="/api/documents", tags=["Documents"])
 
 @app.get("/", tags=["Root"])
 async def read_root():

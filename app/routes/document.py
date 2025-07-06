@@ -1,44 +1,60 @@
-from fastapi import APIRouter, File, UploadFile, HTTPException, Depends
-from app.utils.pdf_parser import parse_pdf
-from app.utils.llm_handler import extract_company_github_username
-from app.utils.github_fetcher import get_organization_members
-
+import uuid
+from fastapi import APIRouter, File, UploadFile, Depends, HTTPException
 from sqlalchemy.orm import Session
+from arq.connections import ArqRedis, create_pool
 from app import models, schemas
 from app.database import get_db
+from worker import WorkerSettings
 
 router = APIRouter()
+arq_pool: ArqRedis = None
 
-@router.post("/upload", response_model=schemas.DocumentResponse)
-async def parse_pdf_route(
-    file: UploadFile = File(...), 
-    db: Session = Depends(get_db)
+@router.on_event("startup")
+async def startup():
+    global arq_pool
+    arq_pool = await create_pool(WorkerSettings.redis_settings)
+
+@router.on_event("shutdown")
+async def shutdown():
+    if arq_pool:
+        await arq_pool.close()
+
+async def get_arq_pool() -> ArqRedis:
+    return arq_pool
+
+@router.post("/upload", response_model=schemas.DocumentUploadResponse)
+async def upload_document(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    arq_pool: ArqRedis = Depends(get_arq_pool)
 ):
+    job_id = str(uuid.uuid4())
     file_content = await file.read()
-    
-    try:
-        text_content = parse_pdf(file_content)
-        if not text_content:
-            raise HTTPException(status_code=422, detail="Could not extract text from PDF.")
-        
-        company_username = extract_company_github_username(text_content)
-        if not company_username:
-            raise HTTPException(status_code=422, detail="LLM could not identify a company GitHub username from the text.")
-        
-        github_members = get_organization_members(company_username)
-        
-        
-        new_document = models.Document(
-            original_filename=file.filename,
-            company_name=company_username,
-            github_members=github_members if github_members is not None else []
-        )
-        db.add(new_document)
-        db.commit()
-        db.refresh(new_document)
 
-        return new_document
-        
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        raise HTTPException(status_code=500, detail=f"An internal error occurred: {str(e)}")
+    # Immediately create a record in the database
+    new_doc = models.Document(
+        job_id=job_id,
+        original_filename=file.filename,
+        status="pending"
+    )
+    db.add(new_doc)
+    db.commit()
+    db.refresh(new_doc)
+
+    # Enqueue the background job
+    await arq_pool.enqueue_job(
+        "process_document_workflow",
+        job_id,
+        file.filename,
+        file_content,
+        _job_id=job_id
+    )
+
+    return schemas.DocumentUploadResponse(job_id=job_id)
+
+@router.get("/status/{job_id}", response_model=schemas.DocumentStatusResponse)
+async def get_document_status(job_id: str, db: Session = Depends(get_db)):
+    document = db.query(models.Document).filter(models.Document.job_id == job_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Job ID not found")
+    return document
